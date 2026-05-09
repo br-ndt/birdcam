@@ -49,7 +49,9 @@ Note the card number (e.g. `card 2`). Edit `birdcam.py` and update `MIC_DEVICE =
 python3 birdcam.py
 ```
 
-Wave your hand in front of your camera, and if all is working you should get a composite video (plus source silent video and audio) in `/path/to/birdcam/captures` as well as stdout content in the terminal running the process.
+Visit `http://{hostname}:5000/stream.mjpg` and you should see the silent live video of your camera. Wave hello!
+
+Additionally, if all is working you should get a composite video (plus source silent video and audio) in `/path/to/birdcam/captures` as well as stdout content in the terminal running the process, noting the detection of motion.
 
 ## Systemd Service
 
@@ -63,5 +65,9 @@ sudo systemctl start birdcam.service
 sudo systemctl status birdcam.service
 journalctl -fu birdcam.service # follow logs
 ```
+
+## Frontend
+
+Take a look in the `frontend` dir if you want a little view for the livestream as well as your captured clips.
 
 Happy birdcamming!
