@@ -1,0 +1,18 @@
+[Unit]
+Description=Bird cam frontend (Vite dev server)
+After=network-online.target birdcam.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yourUser
+WorkingDirectory=/path/to/birdcam/frontend
+ExecStart=/usr/bin/npm run dev
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=development
+
+[Install]
+WantedBy=multi-user.target

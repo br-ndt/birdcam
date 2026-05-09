@@ -1,0 +1,18 @@
+[Unit]
+Description=Bird feeder cam (capture + viewer backend + stream)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yourUser
+WorkingDirectory=/path/to/birdcam
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /path/to/birdcam/birdcam.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
