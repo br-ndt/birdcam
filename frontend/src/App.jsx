@@ -16,6 +16,31 @@ export default function App() {
   })
   const [isBatchDeleting, setIsBatchDeleting] = useState(false)
   const [markedForBatchDelete, setMarkedForBatchDelete] = useState(new Set())
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
+
+  const [favorites, setFavorites] = useState(() => {
+    try {
+      const saved = localStorage.getItem('birdcam_favorites')
+      return saved ? JSON.parse(saved) : []
+    } catch {
+      return []
+    }
+  })
+
+  useEffect(() => {
+    localStorage.setItem('birdcam_favorites', JSON.stringify(favorites))
+  }, [favorites])
+
+  const toggleFavorite = useCallback((clip) => {
+    setFavorites(prev => {
+      const exists = prev.some(f => f.name === clip.name)
+      if (exists) {
+        return prev.filter(f => f.name !== clip.name)
+      } else {
+        return [...prev, clip]
+      }
+    })
+  }, [])
 
   const toggleMarkForBatchDelete = useCallback((name) => {
     setMarkedForBatchDelete(prev => {
@@ -54,6 +79,7 @@ export default function App() {
       try {
         const res = await fetch(`/api/clips/${name}`, { method: 'DELETE' })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        setFavorites(prev => prev.filter(f => f.name !== name))
         fetchClips(page)
       } catch (e) {
         alert(`Failed to delete: ${e.message}`)
@@ -67,6 +93,8 @@ export default function App() {
       .then(() => {
         setIsBatchDeleting(false)
         setMarkedForBatchDelete(new Set())
+        // Clean up deleted items from favorites
+        setFavorites(prev => prev.filter(f => !markedForBatchDelete.has(f.name)))
         fetchClips(page)
       })
       .catch(e => alert(`Failed to delete: ${e.message}`))
@@ -94,27 +122,66 @@ export default function App() {
         <img className="live" src="/stream.mjpg" alt="Live feed" />
       </section>
       <section className="clips-section">
-      <div className="actions">
-        <h2>Clips ({total} total)</h2>
-        <Pagination page={page} totalPages={totalPages} setPage={setPage} />
-        <div className="batch">
-          {isBatchDeleting && (
-            <button className="delete-btn" onClick={confirmBatchDelete} disabled={markedForBatchDelete.size === 0}>
-              Confirm Batch Delete
+        <div className="actions">
+          <div className="clips-title">
+            <h2>{showFavoritesOnly ? 'Favorites' : 'Clips'}</h2>
+            <h3>{showFavoritesOnly ? `${favorites.length} favorites` : `${total} clips`}</h3>
+          </div>
+          {!showFavoritesOnly && <Pagination page={page} totalPages={totalPages} setPage={setPage} />}
+          <div className="btns">
+            <button className={`btn favorite-btn${showFavoritesOnly ? ' active' : ''}`} onClick={() => setShowFavoritesOnly(!showFavoritesOnly)}>
+              {showFavoritesOnly ? 'Show All' : 'Show Favorites'}
             </button>
-          )}
-          <button className={`delete-btn${isBatchDeleting ? ' active' : ''}`} onClick={() => setIsBatchDeleting(!isBatchDeleting)}>
-            {isBatchDeleting ? 'Exit Delete' : 'Batch Delete'}
-          </button>
+            <div className="deletes">
+              {isBatchDeleting && (
+                <button className="btn delete-btn" onClick={confirmBatchDelete} disabled={markedForBatchDelete.size === 0}>
+                  Confirm Batch Delete
+                </button>
+              )}
+              <button className={`btn${isBatchDeleting ? ' active' : ' delete-btn'}`} onClick={() => setIsBatchDeleting(!isBatchDeleting)}>
+                {isBatchDeleting ? 'Exit Delete' : 'Batch Delete'}
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
         <div className="clips">
-          {clips.length === 0 && <p className="empty">No clips yet.</p>}
-          {clips.map((clip) => (
-            <ClipCard key={clip.name} clip={clip} onDelete={handleDelete} isBatchDeleting={isBatchDeleting} toggleMarkForBatchDelete={toggleMarkForBatchDelete} markedForBatchDelete={markedForBatchDelete.has(clip.name)} />
-          ))}
+          {showFavoritesOnly ? (
+            favorites.length === 0 ? (
+              <p className="empty">No favorites yet.</p>
+            ) : (
+              favorites.map((clip) => (
+                <ClipCard
+                  key={clip.name}
+                  clip={clip}
+                  onDelete={handleDelete}
+                  isBatchDeleting={isBatchDeleting}
+                  toggleMarkForBatchDelete={toggleMarkForBatchDelete}
+                  markedForBatchDelete={markedForBatchDelete.has(clip.name)}
+                  isFavorite={true}
+                  toggleFavorite={toggleFavorite}
+                />
+              ))
+            )
+          ) : (
+            clips.length === 0 ? (
+              <p className="empty">No clips yet.</p>
+            ) : (
+              clips.map((clip) => (
+                <ClipCard
+                  key={clip.name}
+                  clip={clip}
+                  onDelete={handleDelete}
+                  isBatchDeleting={isBatchDeleting}
+                  toggleMarkForBatchDelete={toggleMarkForBatchDelete}
+                  markedForBatchDelete={markedForBatchDelete.has(clip.name)}
+                  isFavorite={favorites.some(f => f.name === clip.name)}
+                  toggleFavorite={toggleFavorite}
+                />
+              ))
+            )
+          )}
         </div>
-        <Pagination page={page} totalPages={totalPages} setPage={setPage} />
+        {!showFavoritesOnly && <Pagination page={page} totalPages={totalPages} setPage={setPage} />}
       </section>
     </div>
   )

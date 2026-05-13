@@ -52,6 +52,29 @@ h2 {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 1rem;
+  align-items: flex-start;
+}
+
+.btns {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.deletes {
+  display: flex;
+  gap: 1rem;
+}
+
+.clips-title {
+  display: flex;
+  flex-direction: column;
+}
+
+.clips-title h2, .clips-title h3 {
+  margin: 0;
 }
 
 .clip {
@@ -121,17 +144,10 @@ video,
   font-size: 0.9em;
 }
 
-.batch {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  margin-left: auto;
-}
-
-.delete-btn {
+.btn {
   background: #3a3a3ad3;
-  color: #c66;
-  border: 1px solid #c66;
+  border: 1px solid white;
+  color: white;
   border-radius: 4px;
   padding: 0.25rem 0.75rem;
   cursor: pointer;
@@ -140,20 +156,40 @@ video,
   margin-left: auto;
 }
 
+.btn:hover {
+  background-color: #999;
+  color: #333;
+  border-color: #999;
+}
+
 .delete-btn:hover {
   background: #c66;
-  color: #fff;
+  border-color: #c66;
 }
 
-.delete-btn.active {
-  background: #c66;
-  color: #fff;
+.favorite-btn:hover {
+  background: #ffd700;
+  border-color: #ffd700;
 }
 
-.delete-btn.active:hover {
-  background: rgb(138, 63, 63);
-  color: #fff;
+.delete-btn-icon {
+  background: none;
+  color: #999;
+  border: none;
+  padding: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s, transform 0.1s;
+  margin-left: auto;
 }
+
+.delete-btn-icon:hover {
+  color: #c66;
+  transform: scale(1.1);
+}
+
 
 .delete-btn:disabled {
   background: #555;
