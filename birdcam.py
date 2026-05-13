@@ -7,7 +7,11 @@ import os
 import shutil
 import subprocess
 import threading
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
