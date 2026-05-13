@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=yourUser
 WorkingDirectory=/path/to/birdcam
-Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/birdcam/env
 ExecStart=/usr/bin/python3 /path/to/birdcam/birdcam.py
 Restart=on-failure
 RestartSec=5

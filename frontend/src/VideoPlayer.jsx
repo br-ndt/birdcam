@@ -105,7 +105,7 @@ function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBa
                 </div>
 
                 <div className="controls-main">
-                    <button className="video-btn" onClick={togglePlay}>
+                    <button className="video-btn" onClick={togglePlay} title={isPlaying ? "Pause" : "Play"}>
                         {isPlaying ? (
                             <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
                                 <rect x="6" y="4" width="4" height="16" rx="1" />
@@ -123,29 +123,32 @@ function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBa
                     </div>
 
                     <div className="controls-right">
-                        <button className={`video-btn favorite-icon ${isFavorite ? 'active' : ''}`} onClick={toggleFavorite} aria-label={isFavorite ? "Unfavorite" : "Favorite"}>
-                            <svg viewBox="0 0 24 24" width="20" height="20" fill={isFavorite ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
-                            </svg>
-                        </button>
                         {isBatchDeleting ? (
                             <input
                                 type="checkbox"
                                 className="video-checkbox"
                                 checked={markedForBatchDelete}
                                 onChange={() => toggleMarkForBatchDelete(clipName)}
+                                title="Select for batch delete"
                             />
                         ) : (
-                            <button className="video-btn delete-icon" onClick={() => onDelete(clipName)} aria-label="Delete">
-                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M3 6h18"></path>
-                                    <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
-                                    <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
-                                </svg>
-                            </button>
+                            <>
+                                <button className={`video-btn favorite-icon ${isFavorite ? 'active' : ''}`} onClick={toggleFavorite} aria-label={isFavorite ? "Unfavorite" : "Favorite"} title={isFavorite ? "Unfavorite" : "Favorite"}>
+                                    <svg viewBox="0 0 24 24" width="20" height="20" fill={isFavorite ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                                    </svg>
+                                </button>
+                                <button className="video-btn delete-icon" onClick={() => onDelete(clipName)} aria-label="Delete" title="Delete">
+                                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M3 6h18"></path>
+                                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+                                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+                                    </svg>
+                                </button>
+                            </>
                         )}
 
-                        <button className={`video-btn volume-icon ${isMuted ? 'muted' : ''}`} onClick={toggleMute}>
+                        <button className="video-btn volume-icon" onClick={toggleMute} title={isMuted ? "Unmute" : "Mute"}>
                             {isMuted ? (
                                 <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2">
                                     <path d="M11 5L6 9H2v6h4l5 4V5z" />
@@ -161,7 +164,7 @@ function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBa
                             )}
                         </button>
 
-                        <button className={`video-btn fullscreen-icon ${isFullscreen ? 'active' : ''}`} onClick={toggleFullscreen}>
+                        <button className={`video-btn fullscreen-icon ${isFullscreen ? 'active' : ''}`} onClick={toggleFullscreen} title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}>
                             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2">
                                 <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
                             </svg>

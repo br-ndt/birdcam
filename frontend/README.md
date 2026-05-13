@@ -16,11 +16,17 @@ npm --version # should be greater than 9.*.*
 If not, figure that out, then:
 
 ```bash
+cp .env.local.example .env.local
+```
+
+And change `VITE_BIRDCAM_TOKEN` to match the token you ran the backend with.
+
+```bash
 npm install
 npm run dev
 ```
 
-Open `http://<hostname>:5173` in your browser. You should see the live stream and (if any motion is detected) recorded clips.
+Open `http://<hostname>:5173` in your browser. You should see the live stream and (if any motion is detected) recorded clips. 
 
 ## Systemd Service
 

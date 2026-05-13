@@ -46,7 +46,7 @@ Note the card number (e.g. `card 2`). Edit `birdcam.py` and update `MIC_DEVICE =
 ### Test manually
 
 ```bash
-python3 birdcam.py
+BIRDCAM_TOKEN=abc123 python3 birdcam.py
 ```
 
 Visit `http://{hostname}:5000/stream.mjpg` and you should see the silent live video of your camera. Wave hello!
@@ -55,10 +55,11 @@ Additionally, if all is working you should get a composite video (plus source si
 
 ## Systemd Service
 
-If you want the motion-detection-and-capture behavior to persist like the camera/server:
+If you want the motion-detection-and-capture behavior to persist, first update `env` to contain a secure string (uuid, hash, password, whatever), then:
 
 ```bash
 cp birdcam.service /etc/systemd/system/birdcam.service
+mkdir /etc/birdcam && cp env /etc/birdcam/env
 sudo systemctl daemon-reload
 sudo systemctl enable birdcam.service
 sudo systemctl start birdcam.service

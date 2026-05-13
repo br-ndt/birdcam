@@ -1,3 +1,4 @@
+import { withToken } from './api'
 import VideoPlayer from './VideoPlayer'
 
 function ClipCard({ clip, onDelete, isBatchDeleting, toggleMarkForBatchDelete, markedForBatchDelete, isFavorite, toggleFavorite }) {
@@ -7,7 +8,7 @@ function ClipCard({ clip, onDelete, isBatchDeleting, toggleMarkForBatchDelete, m
         <span>{clip.display_time} · {clip.size_mb} MB</span>
       </div>
       <VideoPlayer 
-        src={`/clips/${clip.name}`} 
+        src={withToken(`/clips/${clip.name}`)} 
         clipName={clip.name}
         onDelete={onDelete}
         isBatchDeleting={isBatchDeleting}

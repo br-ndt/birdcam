@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { withToken } from './api'
 import './App.css'
 import logo from './assets/logo.png'
 import ClipCard from './ClipCard'
@@ -56,7 +57,7 @@ export default function App() {
 
   const fetchClips = useCallback(async (pageToFetch) => {
     try {
-      const res = await fetch(`/api/clips?page=${pageToFetch}`)
+      const res = await fetch(withToken(`/api/clips?page=${pageToFetch}`))
       if (!res.ok) return
       const data = await res.json()
       if (pageToFetch > data.total_pages) {
@@ -77,7 +78,7 @@ export default function App() {
     } else {
       if (!confirm(`Delete ${name}? This cannot be undone.`)) return
       try {
-        const res = await fetch(`/api/clips/${name}`, { method: 'DELETE' })
+        const res = await fetch(withToken(`/api/clips/${name}`), { method: 'DELETE' })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         setFavorites(prev => prev.filter(f => f.name !== name))
         fetchClips(page)
@@ -89,7 +90,7 @@ export default function App() {
 
   const confirmBatchDelete = useCallback(() => {
     if (!confirm('Delete all selected clips? This cannot be undone.')) return
-    Promise.all(markedForBatchDelete.values().map((name) => fetch(`/api/clips/${name}`, { method: 'DELETE' })))
+    Promise.all(markedForBatchDelete.values().map((name) => fetch(withToken(`/api/clips/${name}`), { method: 'DELETE' })))
       .then(() => {
         setIsBatchDeleting(false)
         setMarkedForBatchDelete(new Set())
@@ -119,7 +120,7 @@ export default function App() {
       </section>
       <section className="live-wrap">
         <h2>Live</h2>
-        <img className="live" src="/stream.mjpg" alt="Live feed" />
+        <img className="live" src={withToken("/stream.mjpg")} alt="Live feed" />
       </section>
       <section className="clips-section">
         <div className="actions">
