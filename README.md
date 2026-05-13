@@ -30,9 +30,26 @@ distros.
 
 ## Setup
 
-### Install python dependencies
+### System dependencies
 ```bash
-sudo apt install -y python3-picamera2 python3-opencv python3-flask ffmpeg alsa-utils
+sudo apt install -y ffmpeg alsa-utils libcap-dev
+```
+
+### Install python dependencies
+We recommend using [uv](https://github.com/astral-sh/uv) or a standard python `venv` to manage dependencies.
+
+**Using uv:**
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+```
+
+**Using standard venv:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
 ### Find your microphone's ALSA card number
@@ -46,6 +63,8 @@ Note the card number (e.g. `card 2`). Edit `birdcam.py` and update `MIC_DEVICE =
 ### Test manually
 
 ```bash
+# make sure your virtual environment is activated
+source .venv/bin/activate
 BIRDCAM_TOKEN=abc123 python3 birdcam.py
 ```
 

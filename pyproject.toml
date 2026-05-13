@@ -1,0 +1,14 @@
+[project]
+name = "birdcam"
+version = "0.1.0"
+description = "Raspberry Pi-based motion-triggered bird feeder camera."
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.0.0",
+    "picamera2>=0.3.34",
+    "opencv-python-headless>=4.10.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
