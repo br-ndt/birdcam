@@ -100,6 +100,146 @@ video,
   display: block;
 }
 
+.video-container {
+  position: relative;
+  width: 100%;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #000;
+  line-height: 0;
+}
+
+.video-container video {
+  width: 100%;
+  cursor: pointer;
+}
+
+.video-controls {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 0 10px 10px;
+  background: linear-gradient(transparent, rgba(0,0,0,0.7));
+  transition: opacity 0.3s;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.video-controls.visible {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.controls-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.controls-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.video-btn {
+  background: none;
+  border: none;
+  color: #eee;
+  padding: 5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.video-btn:hover {
+  background: rgba(255,255,255,0.1);
+  color: #fff;
+}
+
+.video-btn.fullscreen-icon:hover {
+  color: #1a8033;
+}
+
+.video-btn.fullscreen-icon.active:hover {
+  color: #999;
+}
+
+.video-btn.volume-icon:hover {
+  color: #6af;
+}
+
+.video-btn.volume-icon.muted {
+  color: #c66;
+}
+
+.video-btn.volume-icon.muted:hover {
+  color: #999;
+}
+
+.video-btn.delete-icon:hover {
+  color: #c66;
+}
+
+.video-btn.favorite-icon.active {
+  color: #ffd700;
+}
+
+.video-btn.favorite-icon:hover {
+  color: #ffd700;
+}
+
+.video-checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #c66;
+  margin: 0 5px;
+  margin-left: 6px;
+}
+
+.progress-wrap {
+  width: 100%;
+  padding: 10px 0;
+}
+
+.progress-bar {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  background-image: linear-gradient(to right, #c66 var(--progress, 0%), transparent var(--progress, 0%));
+}
+
+.progress-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #c66;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.progress-bar:hover::-webkit-slider-thumb {
+  transform: scale(1.2);
+}
+
+.time-display {
+  color: #eee;
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+}
+
 .empty {
   color: #999;
   font-style: italic;
