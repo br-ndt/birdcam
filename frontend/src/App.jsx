@@ -19,6 +19,10 @@ export default function App() {
   const [markedForBatchDelete, setMarkedForBatchDelete] = useState(new Set())
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
 
+  const [rotation, setRotation] = useState(0)
+  const [rotationLoading, setRotationLoading] = useState(true)
+  const [rotationSaving, setRotationSaving] = useState(false)
+
   const [favorites, setFavorites] = useState(() => {
     try {
       const saved = localStorage.getItem('birdcam_favorites')
@@ -99,12 +103,12 @@ export default function App() {
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-        setIsBatchDeleting(false)
-        setMarkedForBatchDelete(new Set())
-        // Clean up deleted items from favorites
+      setIsBatchDeleting(false)
+      setMarkedForBatchDelete(new Set())
+      // Clean up deleted items from favorites
       const deletedSet = new Set(toDelete)
       setFavorites(prev => prev.filter(f => !deletedSet.has(f.name)))
-        fetchClips(page)
+      fetchClips(page)
     } catch (e) {
       alert(`Failed to delete: ${e.message}`)
     }
@@ -146,6 +150,41 @@ export default function App() {
   }, [page, fetchClips])
 
   useEffect(() => {
+    let mounted = true
+    const fetchRotation = async () => {
+      try {
+        const res = await fetch(withToken('/api/rotation'))
+        if (!res.ok) return
+        const data = await res.json()
+        if (mounted && typeof data.rotation === 'number') setRotation(data.rotation)
+      } catch (e) {
+        console.debug('Failed to fetch rotation', e)
+      } finally {
+        if (mounted) setRotationLoading(false)
+      }
+    }
+    fetchRotation()
+    return () => { mounted = false }
+  }, [])
+
+  const saveRotation = async () => {
+    try {
+      setRotationSaving(true)
+      const res = await fetch(withToken('/api/rotation'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rotation }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      // Optionally re-fetch or notify success
+    } catch (e) {
+      alert(`Failed to save rotation: ${e.message}`)
+    } finally {
+      setRotationSaving(false)
+    }
+  }
+
+  useEffect(() => {
     const id = setInterval(() => fetchClips(page), POLL_INTERVAL_MS)
     return () => clearInterval(id)
   }, [page, fetchClips])
@@ -162,6 +201,18 @@ export default function App() {
       <section className="live-wrap">
         <h2>Live</h2>
         <img className="live" src={withToken("/stream.mjpg")} alt="Live feed" />
+        <div className="rotation-control" style={{ marginTop: '8px' }}>
+          <label style={{ marginRight: '8px' }}>Rotation:</label>
+          <select value={rotation} onChange={(e) => setRotation(parseInt(e.target.value, 10))} disabled={rotationLoading || rotationSaving}>
+            <option value={0}>0°</option>
+            <option value={90}>90°</option>
+            <option value={180}>180°</option>
+            <option value={270}>270°</option>
+          </select>
+          <button className="btn" style={{ marginLeft: '8px' }} onClick={saveRotation} disabled={rotationLoading || rotationSaving}>
+            {rotationSaving ? 'Saving...' : 'Apply'}
+          </button>
+        </div>
       </section>
       <section className="clips-section">
         <div className="actions">

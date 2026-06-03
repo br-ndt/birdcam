@@ -83,7 +83,7 @@ function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBa
         >
             <video
                 ref={videoRef}
-                src={src}
+                src={`${src}#t=0.001`}
                 onClick={togglePlay}
                 onTimeUpdate={handleTimeUpdate}
                 onLoadedMetadata={handleLoadedMetadata}
