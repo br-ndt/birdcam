@@ -418,6 +418,43 @@ def api_delete_clip(filename):
     return jsonify({"deleted": deleted})
 
 
+@app.route("/api/clips/batch_delete", methods=["POST"])
+@require_token
+def api_delete_clips_list():
+    """Delete a provided list of clip filenames.
+
+    Body: { "delete": ["clip1.mp4", "clip2.mp4"] }
+    Returns: { "deleted": ["clip1.mp4", ...] }
+    """
+    data = request.get_json() or {}
+    delete_list = data.get("delete", [])
+    if not isinstance(delete_list, list):
+        return jsonify({"error": "delete must be a list"}), 400
+
+    deleted = []
+    for name in delete_list:
+        if not is_valid_clip_name(name):
+            continue
+        target = CAPTURE_DIR / name
+        if not target.exists():
+            continue
+        target.unlink()
+        thumb = THUMB_DIR / (target.stem + ".jpg")
+        if thumb.exists():
+            thumb.unlink()
+        deleted.append(name)
+
+    print(f"deleted list: {len(deleted)} clips")
+    return jsonify({"deleted": deleted})
+
+
+@app.route("/api/clips/names")
+@require_token
+def api_clips_names():
+    """Return a JSON list of all clip filenames (newest first)."""
+    clips, _ = list_clips(page=1, per_page=999999999)
+    names = [name for name, _, _ in clips]
+    return jsonify({"names": names})
 def mjpeg_generator():
     """Yields multipart MJPEG frames as bytes."""
     while True:

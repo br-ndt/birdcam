@@ -88,18 +88,56 @@ export default function App() {
     }
   }, [isBatchDeleting, page, fetchClips])
 
-  const confirmBatchDelete = useCallback(() => {
+  const confirmBatchDelete = useCallback(async () => {
     if (!confirm('Delete all selected clips? This cannot be undone.')) return
-    Promise.all(markedForBatchDelete.values().map((name) => fetch(withToken(`/api/clips/${name}`), { method: 'DELETE' })))
-      .then(() => {
+    try {
+      const toDelete = Array.from(markedForBatchDelete.values())
+      const res = await fetch(withToken('/api/clips/batch_delete'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delete: toDelete }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
         setIsBatchDeleting(false)
         setMarkedForBatchDelete(new Set())
         // Clean up deleted items from favorites
-        setFavorites(prev => prev.filter(f => !markedForBatchDelete.has(f.name)))
+      const deletedSet = new Set(toDelete)
+      setFavorites(prev => prev.filter(f => !deletedSet.has(f.name)))
         fetchClips(page)
-      })
-      .catch(e => alert(`Failed to delete: ${e.message}`))
+    } catch (e) {
+      alert(`Failed to delete: ${e.message}`)
+    }
   }, [markedForBatchDelete, page, fetchClips])
+
+  const handleDeleteAllNonFavorited = useCallback(async () => {
+    if (!confirm('Delete non-favorited clips on this page? This cannot be undone.')) return
+    try {
+      console.debug('DeleteNonFav: clips', clips)
+      console.debug('DeleteNonFav: favorites', favorites)
+      const favSet = new Set(favorites.map(f => f.name))
+      const nonFavs = clips.filter(c => !favSet.has(c && c.name))
+      console.debug('DeleteNonFav: nonFavs', nonFavs)
+      const toDelete = nonFavs.map(c => (c && c.name) || c)
+      if (toDelete.length === 0) {
+        alert('No non-favorited clips on this page to delete.')
+        return
+      }
+      const res = await fetch(withToken('/api/clips/batch_delete'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delete: toDelete }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      alert(`Deleted ${data.deleted.length} clips.`)
+      const deletedSet = new Set(toDelete)
+      setFavorites(prev => prev.filter(f => !deletedSet.has(f.name)))
+      fetchClips(page)
+    } catch (e) {
+      alert(`Failed to delete non-favorited: ${e.message}`)
+    }
+  }, [favorites, clips, page, fetchClips])
 
   useEffect(() => {
     fetchClips(page)
@@ -111,6 +149,9 @@ export default function App() {
     const id = setInterval(() => fetchClips(page), POLL_INTERVAL_MS)
     return () => clearInterval(id)
   }, [page, fetchClips])
+
+  const favNames = new Set(favorites.map(f => f.name))
+  const nonFavoritesOnPage = clips.filter(c => !favNames.has(c.name)).length
 
   return (
     <div className="app">
@@ -134,6 +175,14 @@ export default function App() {
               {showFavoritesOnly ? 'Show All' : 'Show Favorites'}
             </button>
             <div className="deletes">
+              <button
+                className="btn delete-btn"
+                onClick={handleDeleteAllNonFavorited}
+                disabled={nonFavoritesOnPage === 0}
+                title={nonFavoritesOnPage === 0 ? 'No non-favorites on this page' : 'Delete non-favorites on this page'}
+              >
+                Delete Non-Favorites
+              </button>
               {isBatchDeleting && (
                 <button className="btn delete-btn" onClick={confirmBatchDelete} disabled={markedForBatchDelete.size === 0}>
                   Confirm Batch Delete

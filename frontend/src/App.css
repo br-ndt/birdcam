@@ -294,6 +294,7 @@ video,
   font: inherit;
   font-size: 0.85em;
   margin-left: auto;
+  min-width: 120px;
 }
 
 .btn:hover {
