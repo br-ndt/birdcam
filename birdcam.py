@@ -34,32 +34,12 @@ from picamera2 import Picamera2
 # quiet down Flask's request logging
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
-# --- config ---
 CAPTURE_DIR = Path("captures")
 THUMB_DIR = CAPTURE_DIR / ".thumbnails"
 TMP_DIR = CAPTURE_DIR / ".tmp"
 ROTATION_FILE = CAPTURE_DIR / ".rotation"
 RECORDING_FLAG_FILE = CAPTURE_DIR / ".recording_enabled"
-LOW_RES = (640, 480)
-HIGH_RES = (1920, 1080)
-FPS = 30
-MIC_DEVICE = "plughw:2,0"
-MOTION_THRESHOLD = 5000
-QUIET_SECONDS = 3
-MAX_CLIP_SECONDS = 120
-PORT = 5000
-STREAM_FPS = 10
-STREAM_QUALITY = 80
-THUMB_WIDTH = 320
-LENS_POSITION = 1.4        # Module 3 manual focus. dioptres = 1 / metres (1.4 ~= 0.7 m). 0.0 = infinity.
-DEFAULT_ROTATION = 270     # degrees clockwise; 270 == 90 CCW, which corrects a camera mounted 90 clockwise.
-FRAME_QUEUE_MAX = FPS * 2  # ~2 s of frames buffered to the encoder before we start dropping rather than stall.
-HEARTBEAT_TIMEOUT = 30     # seconds without a delivered frame => assume the pipeline is wedged and restart.
-MIN_FREE_MB = 500          # don't start a clip below this; prune oldest clips first (retention).
-RETENTION_TARGET_MB = 1000 # prune down to at least this much free so we don't thrash at the threshold.
-RECORD_COOLDOWN = 5        # seconds to wait before retrying after a failed or skipped recording.
-KILL_GRACE = 10            # seconds past MAX_CLIP_SECONDS before a stalled ffmpeg is force-killed.
-VERSION = "0.6.0"
+DEFAULT_ROTATION = 0     # degrees clockwise; 270 == 90 CCW, which corrects a camera mounted 90 clockwise.
 
 CONFIG_PATHS = [
     Path("/etc/birdcam/config.toml"),
@@ -187,6 +167,29 @@ def set_recording_enabled(enabled):
 
 
 CONFIG = load_config()
+
+LOW_RES             = tuple(CONFIG.get("low_res", (640, 480)))
+HIGH_RES            = tuple(CONFIG.get("high_res", (1920, 1080)))
+FPS                 = CONFIG.get("fps", 30)
+MIC_DEVICE          = CONFIG.get("mic_device", "plughw:2,0")
+MOTION_THRESHOLD    = CONFIG.get("motion_threshold", 5000)
+QUIET_SECONDS       = CONFIG.get("quiet_seconds", 3)
+MAX_CLIP_SECONDS    = CONFIG.get("max_clip_seconds", 120)
+PORT                = CONFIG.get("port", 5000)
+STREAM_FPS          = CONFIG.get("stream_fps", 10)
+STREAM_QUALITY      = CONFIG.get("stream_quality", 80)
+THUMB_WIDTH         = CONFIG.get("thumb_width", 320)
+LENS_POSITION       = CONFIG.get("lens_position", 1.4)
+FRAME_QUEUE_MAX     = CONFIG.get("frame_queue_max", FPS * 2)
+HEARTBEAT_TIMEOUT   = CONFIG.get("heartbeat_timeout", 30)
+MIN_FREE_MB         = CONFIG.get("min_free_mb", 500)
+RETENTION_TARGET_MB = CONFIG.get("retention_target_mb", 1000)
+RECORD_COOLDOWN     = CONFIG.get("record_cooldown", 5)
+KILL_GRACE          = CONFIG.get("kill_grace", 10)
+VIDEO_ENCODER       = CONFIG.get("video_encoder", "h264_v4l2m2m" if os.path.exists("/dev/video11") else "libx264")
+VIDEO_BITRATE       = CONFIG.get("video_bitrate", "4M")
+VIDEO_CRF           = str(CONFIG.get("video_crf", 23))
+
 load_rotation()
 load_recording_enabled()
 STARTED_AT = time()
@@ -302,13 +305,19 @@ def recorder_thread(final_path, frame_q, width, height, stop_event):
     tmp_video = str(TMP_DIR / f"{stem}.video.mp4")
     tmp_audio = str(TMP_DIR / f"{stem}.audio.wav")
 
+    if VIDEO_ENCODER == "h264_v4l2m2m":
+        enc_args = ["-c:v", "h264_v4l2m2m", "-b:v", VIDEO_BITRATE]
+    else:
+        enc_args = ["-c:v", VIDEO_ENCODER, "-preset", "veryfast", "-crf", VIDEO_CRF]
+
+
     video = subprocess.Popen(
         [
             "ffmpeg", "-y", "-loglevel", "error",
             # raw rotated frames on stdin, timestamped by arrival so dropped frames don't desync
             "-use_wallclock_as_timestamps", "1",
             "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", str(FPS), "-i", "-",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+            *enc_args, "-pix_fmt", "yuv420p",
             "-f", "mp4", tmp_video,
         ],
         stdin=subprocess.PIPE,

@@ -40,13 +40,14 @@ We recommend using [uv](https://github.com/astral-sh/uv) or a standard python `v
 
 **Using uv:**
 ```bash
-uv venv
+uv venv --system-site-packages
 source .venv/bin/activate
 uv pip install -e .
 ```
 
 **Using standard venv:**
 ```bash
+sudo apt install python3-picamera2
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -58,7 +59,7 @@ pip install -e .
 arecord -l
 ```
 
-Note the card number (e.g. `card 2`). Edit `birdcam.py` and update `MIC_DEVICE = "plughw:2,0"` if the number is different.
+Note the card number (e.g. `card 2`). Add/Edit `/etc/birdcam/config.toml` and update `mic_device = "plughw:{card_number},0"` if the number is different.
 
 ### Test manually
 
@@ -71,6 +72,15 @@ BIRDCAM_TOKEN=abc123 python3 birdcam.py
 Visit `http://{hostname}:5000/stream.mjpg` and you should see the silent live video of your camera. Wave hello!
 
 Additionally, if all is working you should get a composite video (plus source silent video and audio) in `/path/to/birdcam/captures` as well as stdout content in the terminal running the process, noting the detection of motion.
+
+## Hardware Encoding
+
+If your system has a hardware encoder, we recommend adding/editing an `/etc/birdcam/config.toml` file:
+
+```toml
+video_encoder = "h264_v4l2m2m" # example
+video_bitrate = "4M"
+```
 
 ## Systemd Service
 
