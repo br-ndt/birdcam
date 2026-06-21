@@ -9,8 +9,8 @@ User=yourUser
 WorkingDirectory=/path/to/birdcam
 EnvironmentFile=/etc/birdcam/env
 ExecStart=/path/to/birdcam/.venv/bin/python /path/to/birdcam/birdcam.py
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=2
 StandardOutput=journal
 StandardError=journal
 

@@ -18,7 +18,7 @@ export default function App() {
   const [isBatchDeleting, setIsBatchDeleting] = useState(false)
   const [markedForBatchDelete, setMarkedForBatchDelete] = useState(new Set())
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
-
+  const [recordingState, setRecordingState] = useState(false)
   const [rotation, setRotation] = useState(0)
   const [rotationLoading, setRotationLoading] = useState(true)
   const [rotationSaving, setRotationSaving] = useState(false)
@@ -59,6 +59,18 @@ export default function App() {
     })
   }, [])
 
+  const fetchRecordingState = useCallback(async () => {
+    try {
+      const res = await fetch(withToken('/api/recording'))
+      if (!res.ok) return
+      const data = await res.json()
+      setRecordingState((data.recording_enabled === true || data.recording_enabled === "true"))
+      return data.recording
+    } catch (e) {
+      console.error('fetch failed', e)
+    }
+  }, []);
+
   const fetchClips = useCallback(async (pageToFetch) => {
     try {
       const res = await fetch(withToken(`/api/clips?page=${pageToFetch}`))
@@ -75,6 +87,22 @@ export default function App() {
       console.error('fetch failed', e)
     }
   }, [])
+
+  const toggleRecording = useCallback(async () => {
+    try {
+      const newState = !recordingState
+      const res = await fetch(withToken('/api/recording'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newState }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setRecordingState(data.recording_enabled === true || data.recording_enabled === "true")
+    } catch (e) {
+      console.error('toggle recording failed', e)
+    }
+  }, [recordingState])
 
   const handleDelete = useCallback(async (name) => {
     if (isBatchDeleting) {
@@ -144,6 +172,10 @@ export default function App() {
   }, [favorites, clips, page, fetchClips])
 
   useEffect(() => {
+    fetchRecordingState()
+  }, [])
+
+  useEffect(() => {
     fetchClips(page)
     const url = page === 1 ? '/' : `/?page=${page}`
     window.history.replaceState(null, '', url)
@@ -211,6 +243,9 @@ export default function App() {
           </select>
           <button className="btn" style={{ marginLeft: '8px' }} onClick={saveRotation} disabled={rotationLoading || rotationSaving}>
             {rotationSaving ? 'Saving...' : 'Apply'}
+          </button>
+          <button className="btn" style={{ marginLeft: '8px' }} onClick={toggleRecording} >
+            {recordingState ? 'Stop Recording' : 'Start Recording'}
           </button>
         </div>
       </section>

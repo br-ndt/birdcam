@@ -3,7 +3,12 @@ Bird feeder cam: motion-triggered A/V capture + live MJPEG stream + web viewer.
 
 All in one process so we share a single camera instance.
 
-Rotation is handled in software.
+Rotation is handled in software. A single `rotation` setting
+(0/90/180/270 degrees clockwise, settable at runtime via /api/rotation) is
+applied to every frame before it is used anywhere. The recording path captures
+main frames in Python, rotates them, and pipes them to a single ffmpeg that
+encodes H.264 and muxes the mic audio in one pass -- no intermediate files, no
+second re-encode, no rotation-metadata flag to hope a player honours.
 """
 import logging
 import os
@@ -32,7 +37,9 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # --- config ---
 CAPTURE_DIR = Path("captures")
 THUMB_DIR = CAPTURE_DIR / ".thumbnails"
+TMP_DIR = CAPTURE_DIR / ".tmp"
 ROTATION_FILE = CAPTURE_DIR / ".rotation"
+RECORDING_FLAG_FILE = CAPTURE_DIR / ".recording_enabled"
 LOW_RES = (640, 480)
 HIGH_RES = (1920, 1080)
 FPS = 30
@@ -47,7 +54,12 @@ THUMB_WIDTH = 320
 LENS_POSITION = 1.4        # Module 3 manual focus. dioptres = 1 / metres (1.4 ~= 0.7 m). 0.0 = infinity.
 DEFAULT_ROTATION = 270     # degrees clockwise; 270 == 90 CCW, which corrects a camera mounted 90 clockwise.
 FRAME_QUEUE_MAX = FPS * 2  # ~2 s of frames buffered to the encoder before we start dropping rather than stall.
-VERSION = "0.3.0"
+HEARTBEAT_TIMEOUT = 30     # seconds without a delivered frame => assume the pipeline is wedged and restart.
+MIN_FREE_MB = 500          # don't start a clip below this; prune oldest clips first (retention).
+RETENTION_TARGET_MB = 1000 # prune down to at least this much free so we don't thrash at the threshold.
+RECORD_COOLDOWN = 5        # seconds to wait before retrying after a failed or skipped recording.
+KILL_GRACE = 10            # seconds past MAX_CLIP_SECONDS before a stalled ffmpeg is force-killed.
+VERSION = "0.6.0"
 
 CONFIG_PATHS = [
     Path("/etc/birdcam/config.toml"),
@@ -57,6 +69,15 @@ CONFIG_PATHS = [
 
 CAPTURE_DIR.mkdir(exist_ok=True)
 THUMB_DIR.mkdir(exist_ok=True)
+TMP_DIR.mkdir(exist_ok=True)
+
+# clear any video/audio/clip temporaries orphaned by a previous crash or kill (including
+# legacy .part files that earlier versions wrote alongside clips)
+for _stale in list(TMP_DIR.iterdir()) + list(CAPTURE_DIR.glob("*.part")):
+    try:
+        _stale.unlink()
+    except OSError:
+        pass
 
 
 def load_config():
@@ -134,8 +155,40 @@ def rotated_size(size, deg):
     return (h, w) if deg in (90, 270) else (w, h)
 
 
+# --- recording master switch: pauses motion-triggered clips; the live stream is unaffected ---
+_recording_lock = threading.Lock()
+_recording_enabled = True
+
+
+def load_recording_enabled():
+    global _recording_enabled
+    try:
+        _recording_enabled = RECORDING_FLAG_FILE.read_text().strip() != "0"
+    except OSError:
+        pass
+
+
+def recording_enabled():
+    with _recording_lock:
+        return _recording_enabled
+
+
+def set_recording_enabled(enabled):
+    """Enable/disable motion-triggered clip recording. Persists across restarts."""
+    global _recording_enabled
+    enabled = bool(enabled)
+    with _recording_lock:
+        _recording_enabled = enabled
+    try:
+        RECORDING_FLAG_FILE.write_text("1" if enabled else "0")
+    except OSError:
+        pass
+    return enabled
+
+
 CONFIG = load_config()
 load_rotation()
+load_recording_enabled()
 STARTED_AT = time()
 
 # --- camera setup (single shared instance) ---
@@ -151,6 +204,8 @@ config = picam2.create_video_configuration(
 picam2.configure(config)
 picam2.start()
 sleep(2)
+# Module 3: pin focus for a static feeder so autofocus can't hunt onto the housing.
+picam2.set_controls({"AfMode": controls.AfModeEnum.Manual, "LensPosition": LENS_POSITION})
 
 # --- shared state for the live stream + status ---
 latest_jpeg = None
@@ -164,6 +219,10 @@ state = {
     "recording_started_at": None,
     "last_motion_at": None,
 }
+
+
+# updated after each delivered frame in motion_loop; the watchdog reads it to detect a wedged pipeline
+_last_loop_at = time()
 
 
 def set_state(**kwargs):
@@ -198,6 +257,29 @@ def detect_motion(prev_frame, gray):
     return cv2.countNonZero(thresh), blurred
 
 
+def free_mb():
+    return shutil.disk_usage(CAPTURE_DIR).free / (1024 * 1024)
+
+
+def enforce_retention():
+    """Delete oldest clips (+ their thumbnails) until free space is back above the target.
+    Returns the resulting free MB. A no-op when there's already room."""
+    if free_mb() >= RETENTION_TARGET_MB:
+        return free_mb()
+    for clip in sorted(CAPTURE_DIR.glob("clip_*.mp4"), key=lambda p: p.stat().st_mtime):
+        if free_mb() >= RETENTION_TARGET_MB:
+            break
+        try:
+            clip.unlink()
+            thumb = THUMB_DIR / (clip.stem + ".jpg")
+            if thumb.exists():
+                thumb.unlink()
+            print(f"retention: pruned {clip.name}", flush=True)
+        except OSError:
+            pass
+    return free_mb()
+
+
 def update_stream_jpeg(yuv):
     """Convert lores YUV frame to JPEG (rotated to the current setting) and stash it for the stream."""
     global latest_jpeg
@@ -210,71 +292,173 @@ def update_stream_jpeg(yuv):
         new_frame_event.set()
 
 
-def recorder_thread(final_path, frame_q, width, height):
-    """Owns one clip's ffmpeg process. Pulls raw rotated frames off the queue, encodes
-    H.264 + muxes the mic in a single pass, then makes a thumbnail. Runs off the motion
-    loop so a slow encoder never stalls detection -- frames just drop at the queue."""
-    proc = subprocess.Popen(
+def recorder_thread(final_path, frame_q, width, height, stop_event):
+    """One clip. Video frames (already rotated) are piped into a VIDEO-ONLY ffmpeg; audio is
+    captured separately by arecord. Keeping the mic out of the encoder means the encoder can
+    never hold the device -- arecord owns it and releases it promptly on stop, so a clip can't
+    lock the mic against the next one. On stop the two temp files are muxed (copy) into the
+    final clip on a background thread, so this thread returns as soon as the mic is freed."""
+    stem = Path(final_path).stem
+    tmp_video = str(TMP_DIR / f"{stem}.video.mp4")
+    tmp_audio = str(TMP_DIR / f"{stem}.audio.wav")
+
+    video = subprocess.Popen(
         [
             "ffmpeg", "-y", "-loglevel", "error",
-            # video in: raw rotated frames on stdin. Timestamp by arrival (wall clock) so
-            # the track stays aligned with the live audio even if the capture loop drops frames.
+            # raw rotated frames on stdin, timestamped by arrival so dropped frames don't desync
             "-use_wallclock_as_timestamps", "1",
             "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", str(FPS), "-i", "-",
-            # audio in: straight off the mic
-            "-f", "alsa", "-thread_queue_size", "1024", "-i", MIC_DEVICE,
-            # one encode, broadly-compatible pixel format, end when the video (stdin) ends
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-shortest",
-            final_path,
+            "-f", "mp4", tmp_video,
         ],
         stdin=subprocess.PIPE,
     )
-    try:
-        while True:
-            item = frame_q.get()
-            if item is None:          # sentinel: stop requested, drain done
-                break
+    audio = subprocess.Popen(
+        ["arecord", "-D", MIC_DEVICE, "-f", "cd", "-q", tmp_audio],
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Backstop: never let either child outlive the clip and hold the mic or the pipe.
+    def _kill_both():
+        for p in (video, audio):
             try:
-                proc.stdin.write(item)
-            except (BrokenPipeError, ValueError):
-                break                 # ffmpeg went away; bail and finalize whatever exists
-    finally:
+                p.kill()
+            except OSError:
+                pass
+    killer = threading.Timer(MAX_CLIP_SECONDS + KILL_GRACE, _kill_both)
+    killer.daemon = True
+    killer.start()
+
+    def _write(item):
         try:
-            proc.stdin.close()        # EOF on the video input -> ffmpeg writes the moov atom and exits
+            video.stdin.write(item)
+            return True
+        except (BrokenPipeError, ValueError):
+            return False
+
+    try:
+        while not stop_event.is_set():
+            try:
+                item = frame_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if not _write(item):
+                break
+        while True:                       # drain the tail of the clip
+            try:
+                item = frame_q.get_nowait()
+            except queue.Empty:
+                break
+            if not _write(item):
+                break
+    finally:
+        killer.cancel()
+        # Release the mic FIRST so the next clip can start immediately: arecord finalises the
+        # wav and frees plughw on SIGTERM.
+        try:
+            audio.terminate()
+            audio.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                audio.kill()
+            except OSError:
+                pass
+        # Finish the video: EOF on stdin -> ffmpeg finalises and exits (fast; no live input).
+        try:
+            video.stdin.close()
         except (OSError, ValueError):
             pass
         try:
-            proc.wait(timeout=15)
+            video.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        if Path(final_path).exists():
-            generate_thumbnail(final_path, THUMB_DIR / (Path(final_path).stem + ".jpg"))
-        print(f"saved -> {Path(final_path).name}")
+            video.kill()
+        # Mux on a background thread so the mic stays free and the loop can record again now.
+        threading.Thread(
+            target=_mux_and_finalize, args=(final_path, tmp_video, tmp_audio), daemon=True
+        ).start()
+
+
+def _mux_and_finalize(final_path, tmp_video, tmp_audio):
+    """Mux the temp video (copy) + audio (to AAC) into the final clip, build the thumbnail,
+    then atomically rename so the UI only ever sees a finished, playable file. Tolerates a
+    missing/empty audio file -- a clip with no sound still beats no clip."""
+    working_path = str(TMP_DIR / (Path(final_path).stem + ".part"))
+    have_video = Path(tmp_video).exists() and Path(tmp_video).stat().st_size > 0
+    have_audio = Path(tmp_audio).exists() and Path(tmp_audio).stat().st_size > 0
+    if not have_video:
+        print(f"WARNING: no video for {Path(final_path).name}; discarding", flush=True)
+        _cleanup(tmp_video, tmp_audio)
+        return
+
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_video]
+    if have_audio:
+        cmd += ["-i", tmp_audio, "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-shortest"]
+    else:
+        cmd += ["-c:v", "copy"]
+    cmd += ["-f", "mp4", working_path]
+
+    rc = subprocess.run(cmd).returncode
+    if rc == 0 and Path(working_path).exists():
+        generate_thumbnail(working_path, THUMB_DIR / (Path(final_path).stem + ".jpg"))
+        os.rename(working_path, final_path)
+        print(f"saved -> {Path(final_path).name}", flush=True)
+    else:
+        print(f"WARNING: mux failed ({rc}) for {Path(final_path).name}; discarding", flush=True)
+        _cleanup(working_path)
+    _cleanup(tmp_video, tmp_audio)
+
+
+def _cleanup(*paths):
+    for p in paths:
+        try:
+            Path(p).unlink()
+        except OSError:
+            pass
 
 
 def motion_loop():
     """Background thread. Owns all camera reads. Lores drives motion detection + the live
-    stream; while recording, main frames are rotated and handed to a recorder thread."""
+    stream; while recording, main frames are rotated and handed to a recorder thread.
+    Every delivered frame updates the watchdog heartbeat, and the body is guarded so a
+    single bad frame (or a transient camera error) can't silently kill the thread."""
+    global _last_loop_at
     prev_frame = None
     recording = False
     record_started_at = 0.0
     last_motion_at = 0.0
     last_stream_update = 0.0
     frame_q = None
+    stop_event = None
+    recorder_th = None
     clip_rotation = 0
     final_path = None
+    record_cooldown_until = 0.0     # suppress retries for a few seconds after a failure/skip
 
-    print("Motion loop started.")
+    def end_recording(signal_stop=True):
+        nonlocal recording, frame_q, stop_event, recorder_th, prev_frame
+        if signal_stop and stop_event is not None:
+            stop_event.set()          # non-blocking; the recorder drains + finalizes itself
+        recording = False
+        frame_q = None
+        stop_event = None
+        # keep the recorder_th reference: a new clip must wait until it has fully exited
+        # (mic released) before opening the device again
+        prev_frame = None
+        set_state(recording=False, recording_filename=None, recording_started_at=None)
+
+    print("Motion loop started.", flush=True)
     while True:
-        req = picam2.capture_request()
+        try:
+            req = picam2.capture_request()
+        except Exception as e:
+            # don't update the heartbeat -- if this keeps failing, the watchdog restarts us
+            print(f"capture_request failed: {e!r}", flush=True)
+            sleep(0.1)
+            continue
         try:
             lores = req.make_array("lores")
+            _last_loop_at = time()          # heartbeat: the camera delivered a frame
             gray = lores[:LOW_RES[1], :LOW_RES[0]]
             motion_pixels, prev_frame = detect_motion(prev_frame, gray)
             motion = motion_pixels > MOTION_THRESHOLD
@@ -289,52 +473,84 @@ def motion_loop():
                 last_stream_update = now
 
             if recording:
-                main = req.make_array("main")
-                main = rotate_frame(main, clip_rotation)
-                try:
-                    frame_q.put_nowait(main.tobytes())
-                except queue.Full:
-                    pass  # encoder is behind; drop this frame rather than stall detection
+                if not recording_enabled():
+                    # master switch turned off mid-clip -- finish the current clip cleanly
+                    print("recording disabled; stopping current clip", flush=True)
+                    end_recording()
+                elif recorder_th is not None and not recorder_th.is_alive():
+                    # ffmpeg/ALSA failure took the recorder down -- stop cleanly instead of
+                    # spending the next QUIET_SECONDS writing into a dead queue
+                    print("recorder thread ended early; stopping clip", flush=True)
+                    end_recording(signal_stop=False)
+                    record_cooldown_until = now + RECORD_COOLDOWN
+                else:
+                    main = req.make_array("main")
+                    main = rotate_frame(main, clip_rotation)
+                    try:
+                        frame_q.put_nowait(main.tobytes())
+                    except queue.Full:
+                        pass  # encoder is behind; drop this frame rather than stall detection
 
-                if motion:
-                    last_motion_at = now
-                quiet_for = now - last_motion_at
-                recorded_for = now - record_started_at
-                if quiet_for >= QUIET_SECONDS or recorded_for >= MAX_CLIP_SECONDS:
-                    frame_q.put(None)  # signal the recorder to finalize (drains remaining frames first)
-                    reason = "max length" if recorded_for >= MAX_CLIP_SECONDS else "quiet"
-                    print(f"stopped ({reason}, {recorded_for:.1f}s)")
-                    recording = False
-                    frame_q = None
-                    set_state(
-                        recording=False,
-                        recording_filename=None,
-                        recording_started_at=None,
-                    )
-                    prev_frame = None
+                    if motion:
+                        last_motion_at = now
+                    quiet_for = now - last_motion_at
+                    recorded_for = now - record_started_at
+                    if quiet_for >= QUIET_SECONDS or recorded_for >= MAX_CLIP_SECONDS:
+                        reason = "max length" if recorded_for >= MAX_CLIP_SECONDS else "quiet"
+                        print(f"stopped ({reason}, {recorded_for:.1f}s)", flush=True)
+                        end_recording()
             else:
-                if motion:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    final_path = f"{CAPTURE_DIR}/clip_{timestamp}.mp4"
-                    clip_rotation = get_rotation()                  # snapshot: whole clip uses one rotation
-                    out_w, out_h = rotated_size(HIGH_RES, clip_rotation)
-                    frame_q = queue.Queue(maxsize=FRAME_QUEUE_MAX)
-                    threading.Thread(
-                        target=recorder_thread,
-                        args=(final_path, frame_q, out_w, out_h),
-                        daemon=True,
-                    ).start()
-                    record_started_at = now
-                    last_motion_at = now
-                    recording = True
-                    set_state(
-                        recording=True,
-                        recording_filename=f"clip_{timestamp}.mp4",
-                        recording_started_at=now,
-                    )
-                    print(f"motion: {motion_pixels} pixels, recording -> clip_{timestamp}.mp4")
+                recorder_done = recorder_th is None or not recorder_th.is_alive()
+                if motion and recording_enabled() and now >= record_cooldown_until and recorder_done:
+                    free = free_mb()
+                    if free < MIN_FREE_MB:
+                        free = enforce_retention()      # prune oldest clips to make room
+                    if free < MIN_FREE_MB:
+                        # nothing left to prune and still no room -- skip rather than stall ffmpeg
+                        # on a full disk (which would block the write and hold the mic)
+                        print(f"low disk: {free:.0f} MB free, skipping recording", flush=True)
+                        record_cooldown_until = now + RECORD_COOLDOWN
+                    else:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        final_path = f"{CAPTURE_DIR}/clip_{timestamp}.mp4"
+                        clip_rotation = get_rotation()              # snapshot: whole clip uses one rotation
+                        out_w, out_h = rotated_size(HIGH_RES, clip_rotation)
+                        frame_q = queue.Queue(maxsize=FRAME_QUEUE_MAX)
+                        stop_event = threading.Event()
+                        recorder_th = threading.Thread(
+                            target=recorder_thread,
+                            args=(final_path, frame_q, out_w, out_h, stop_event),
+                            daemon=True,
+                        )
+                        recorder_th.start()
+                        record_started_at = now
+                        last_motion_at = now
+                        recording = True
+                        set_state(
+                            recording=True,
+                            recording_filename=f"clip_{timestamp}.mp4",
+                            recording_started_at=now,
+                        )
+                        print(f"motion: {motion_pixels} pixels, recording -> clip_{timestamp}.mp4", flush=True)
+        except Exception as e:
+            # one bad frame shouldn't take down the loop; log it and keep going
+            print(f"motion_loop iteration error: {e!r}", flush=True)
+            if recording:
+                end_recording()
         finally:
             req.release()
+
+
+def watchdog():
+    """If the capture loop stops delivering frames -- silent thread death, a deadlock, or a
+    wedged camera -- log loudly and exit so systemd restarts us cleanly. Requires
+    Restart=always (or on-failure) in the unit file to actually recover."""
+    while True:
+        sleep(HEARTBEAT_TIMEOUT / 2)
+        stalled = time() - _last_loop_at
+        if stalled > HEARTBEAT_TIMEOUT:
+            print(f"WATCHDOG: capture loop stalled {stalled:.0f}s, exiting for restart", flush=True)
+            os._exit(1)
 
 
 # --- Flask app ---
@@ -412,6 +628,7 @@ def api_status():
         "version": VERSION,
         "uptime_seconds": int(time() - STARTED_AT),
         "recording": s["recording"],
+        "recording_enabled": recording_enabled(),
         "recording_filename": s["recording_filename"],
         "recording_started_at": s["recording_started_at"],
         "last_motion_at": s["last_motion_at"],
@@ -559,6 +776,38 @@ def api_set_rotation():
     return jsonify({"rotation": deg})
 
 
+@app.route("/api/recording", methods=["GET"])
+@require_token
+def api_get_recording():
+    return jsonify({"recording_enabled": recording_enabled()})
+
+
+@app.route("/api/recording", methods=["POST"])
+@require_token
+def api_set_recording():
+    """Turn motion-triggered clip recording on or off. The live stream is unaffected, and
+    turning it off also stops any clip currently in progress. The setting persists across
+    restarts. Body {"enabled": true|false} or ?enabled=true/false/1/0."""
+    data = request.get_json(silent=True) or {}
+    val = data.get("enabled", request.args.get("enabled"))
+    if val is None:
+        return jsonify({"error": "missing 'enabled'"}), 400
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            enabled = True
+        elif v in ("false", "0", "no", "off"):
+            enabled = False
+        else:
+            return jsonify({"error": "enabled must be true or false"}), 400
+    else:
+        enabled = bool(val)
+    print(enabled)
+    enabled = set_recording_enabled(enabled)
+    print(f"recording {'enabled' if enabled else 'disabled'} via API", flush=True)
+    return jsonify({"recording_enabled": enabled})
+
+
 def mjpeg_generator():
     """Yields multipart MJPEG frames as bytes."""
     while True:
@@ -582,6 +831,6 @@ def stream():
 
 
 if __name__ == "__main__":
-    t = threading.Thread(target=motion_loop, daemon=True)
-    t.start()
+    threading.Thread(target=motion_loop, daemon=True).start()
+    threading.Thread(target=watchdog, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
