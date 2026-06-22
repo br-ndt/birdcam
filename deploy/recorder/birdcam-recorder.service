@@ -1,6 +1,6 @@
 [Unit]
-Description=Bird feeder cam (capture + viewer backend + stream)
-After=network-online.target sound.target
+Description=birdcam recorder (RTSP ingest + clip recording + viewer backend + stream)
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -8,7 +8,7 @@ Type=simple
 User=yourUser
 WorkingDirectory=/path/to/birdcam
 EnvironmentFile=/etc/birdcam/env
-ExecStart=/path/to/birdcam/.venv/bin/birdcam-standalone
+ExecStart=/path/to/birdcam/.venv/bin/birdcam-recorder
 Restart=always
 RestartSec=2
 StandardOutput=journal

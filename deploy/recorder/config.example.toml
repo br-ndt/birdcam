@@ -1,0 +1,34 @@
+# /etc/birdcam/config.toml -- recorder settings (the fleet ingest box; e.g. the Pi 5).
+# The recorder pulls camera nodes over RTSP, records the main stream with `ffmpeg -c copy`
+# (no re-encode), and runs motion detection on the detect substream. Two things are NOT here:
+#   - rotation: set per-camera in the web UI, persisted to <captures>/.rotation
+#   - the auth token: BIRDCAM_TOKEN, in /etc/birdcam/env
+# Seeded once by the installer and never overwritten.
+#
+# Camera-only keys (low_res / high_res / fps / lens_position / mic_device / video_bitrate /
+# record_audio) do nothing here -- the recorder never opens a camera. Leave them out.
+
+# --- which node to pull (REQUIRED) ---
+rtsp_main   = "rtsp://CHANGE-ME:8554/cam"   # node main stream (full-res H.264). rtsp_main is
+                                            # mandatory; without it the recorder won't start.
+rtsp_detect = ""                            # low-res detect substream, e.g.
+                                            # "rtsp://CHANGE-ME:8554/cam-lo". Empty = run motion
+                                            # on the full main stream (heavier decode). Enable the
+                                            # `cam-lo` path in the node's mediamtx.yml, then set it.
+
+# --- motion / clips ---
+motion_threshold = 5000     # changed pixels needed to trigger
+quiet_seconds    = 3        # stop the clip after this many seconds of no motion
+max_clip_seconds = 120
+record_cooldown  = 5        # wait this long after a failed/skipped clip before retrying
+
+# --- live stream ---
+stream_fps     = 10
+stream_quality = 80
+thumb_width    = 320
+
+# --- web + housekeeping ---
+port                = 5000
+heartbeat_timeout   = 30     # seconds without a frame before the watchdog restarts ingest
+min_free_mb         = 500    # below this, prune old clips before recording
+retention_target_mb = 1000   # prune down to roughly this
