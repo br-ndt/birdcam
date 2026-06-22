@@ -1,0 +1,13 @@
+[Unit]
+Description=MediaMTX camera node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/mediamtx /etc/mediamtx/mediamtx.yml
+Restart=always
+RestartSec=2
+User=ergor
+
+[Install]
+WantedBy=multi-user.target
