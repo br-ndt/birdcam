@@ -12,7 +12,6 @@ second re-encode, no rotation-metadata flag to hope a player honours.
 """
 import logging
 import os
-import queue
 import shutil
 import subprocess
 import threading
@@ -30,6 +29,8 @@ import cv2
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 from libcamera import controls
 from picamera2 import Picamera2
+from picamera2.encoders import H264Encoder
+from picamera2.outputs import FfmpegOutput
 
 # quiet down Flask's request logging
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -123,18 +124,6 @@ def set_rotation(deg):
     return deg
 
 
-def rotate_frame(frame, deg):
-    """Rotate a numpy frame by the given degrees clockwise (no-op for 0)."""
-    code = ROTATION_TO_CV2.get(deg)
-    return frame if code is None else cv2.rotate(frame, code)
-
-
-def rotated_size(size, deg):
-    """(width, height) after rotation -- swapped for quarter turns."""
-    w, h = size
-    return (h, w) if deg in (90, 270) else (w, h)
-
-
 # --- recording master switch: pauses motion-triggered clips; the live stream is unaffected ---
 _recording_lock = threading.Lock()
 _recording_enabled = True
@@ -180,15 +169,34 @@ STREAM_FPS          = CONFIG.get("stream_fps", 10)
 STREAM_QUALITY      = CONFIG.get("stream_quality", 80)
 THUMB_WIDTH         = CONFIG.get("thumb_width", 320)
 LENS_POSITION       = CONFIG.get("lens_position", 1.4)
-FRAME_QUEUE_MAX     = CONFIG.get("frame_queue_max", FPS * 2)
 HEARTBEAT_TIMEOUT   = CONFIG.get("heartbeat_timeout", 30)
 MIN_FREE_MB         = CONFIG.get("min_free_mb", 500)
 RETENTION_TARGET_MB = CONFIG.get("retention_target_mb", 1000)
 RECORD_COOLDOWN     = CONFIG.get("record_cooldown", 5)
-KILL_GRACE          = CONFIG.get("kill_grace", 10)
-VIDEO_ENCODER       = CONFIG.get("video_encoder", "h264_v4l2m2m" if os.path.exists("/dev/video11") else "libx264")
-VIDEO_BITRATE       = CONFIG.get("video_bitrate", "4M")
-VIDEO_CRF           = str(CONFIG.get("video_crf", 23))
+VIDEO_BITRATE       = CONFIG.get("video_bitrate", "4M")  # H264Encoder bitrate; accepts "4M"/"4000k"/int
+RECORD_AUDIO        = CONFIG.get("record_audio", True)   # set false to force video-only (skips the probe)
+
+
+def _mic_available(device):
+    """Probe the capture device once at startup. FfmpegOutput(audio=True) aborts the whole
+    recording -- video included -- if the mic can't be opened, so when it's missing or wrong
+    we fall back to video-only instead of silently discarding every clip."""
+    if not device:
+        return False
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "alsa", "-i", str(device), "-t", "0.2", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+AUDIO_ENABLED = RECORD_AUDIO and _mic_available(MIC_DEVICE)
+if RECORD_AUDIO and not AUDIO_ENABLED:
+    print(f"WARNING: mic {MIC_DEVICE!r} unavailable; recording video-only", flush=True)
 
 load_rotation()
 load_recording_enabled()
@@ -197,10 +205,9 @@ STARTED_AT = time()
 # --- camera setup (single shared instance) ---
 picam2 = Picamera2()
 config = picam2.create_video_configuration(
-    # RGB888 hands back a BGR-ordered numpy array (a picamera2 quirk), which lines
-    # up with ffmpeg's bgr24 below. If recorded colours look swapped, change the
-    # ffmpeg input to -pix_fmt rgb24.
-    main={"size": HIGH_RES, "format": "RGB888"},
+    # main feeds the hardware H.264 encoder directly; YUV420 is its native input.
+    # lores drives motion detection + the MJPEG stream.
+    main={"size": HIGH_RES, "format": "YUV420"},
     lores={"size": LOW_RES, "format": "YUV420"},
     controls={"FrameDurationLimits": (int(1_000_000 / FPS), int(1_000_000 / FPS))},
 )
@@ -284,10 +291,10 @@ def enforce_retention():
 
 
 def update_stream_jpeg(yuv):
-    """Convert lores YUV frame to JPEG (rotated to the current setting) and stash it for the stream."""
+    """Convert lores YUV frame to JPEG and stash it for the stream. The frame is left in
+    native sensor orientation; the viewer applies rotation for display."""
     global latest_jpeg
     bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
-    bgr = rotate_frame(bgr, get_rotation())   # live rotation -- reflects the endpoint immediately
     ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, STREAM_QUALITY])
     if ok:
         with latest_jpeg_lock:
@@ -295,127 +302,73 @@ def update_stream_jpeg(yuv):
         new_frame_event.set()
 
 
-def recorder_thread(final_path, frame_q, width, height, stop_event):
-    """One clip. Video frames (already rotated) are piped into a VIDEO-ONLY ffmpeg; audio is
-    captured separately by arecord. Keeping the mic out of the encoder means the encoder can
-    never hold the device -- arecord owns it and releases it promptly on stop, so a clip can't
-    lock the mic against the next one. On stop the two temp files are muxed (copy) into the
-    final clip on a background thread, so this thread returns as soon as the mic is freed."""
-    stem = Path(final_path).stem
-    tmp_video = str(TMP_DIR / f"{stem}.video.mp4")
-    tmp_audio = str(TMP_DIR / f"{stem}.audio.wav")
-
-    if VIDEO_ENCODER == "h264_v4l2m2m":
-        enc_args = ["-c:v", "h264_v4l2m2m", "-b:v", VIDEO_BITRATE]
-    else:
-        enc_args = ["-c:v", VIDEO_ENCODER, "-preset", "veryfast", "-crf", VIDEO_CRF]
+def _bitrate_bps(value):
+    """Accept 4_000_000, '4M', or '4000k' and return an int bits-per-second for H264Encoder."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    s = str(value).strip().lower()
+    mult = 1
+    if s.endswith("m"):
+        mult, s = 1_000_000, s[:-1]
+    elif s.endswith("k"):
+        mult, s = 1_000, s[:-1]
+    return int(float(s) * mult)
 
 
-    video = subprocess.Popen(
-        [
-            "ffmpeg", "-y", "-loglevel", "error",
-            # raw rotated frames on stdin, timestamped by arrival so dropped frames don't desync
-            "-use_wallclock_as_timestamps", "1",
-            "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", str(FPS), "-i", "-",
-            *enc_args, "-pix_fmt", "yuv420p",
-            "-f", "mp4", tmp_video,
-        ],
-        stdin=subprocess.PIPE,
-    )
-    audio = subprocess.Popen(
-        ["arecord", "-D", MIC_DEVICE, "-f", "cd", "-q", tmp_audio],
-        stderr=subprocess.DEVNULL,
-    )
-
-    # Backstop: never let either child outlive the clip and hold the mic or the pipe.
-    def _kill_both():
-        for p in (video, audio):
-            try:
-                p.kill()
-            except OSError:
-                pass
-    killer = threading.Timer(MAX_CLIP_SECONDS + KILL_GRACE, _kill_both)
-    killer.daemon = True
-    killer.start()
-
-    def _write(item):
-        try:
-            video.stdin.write(item)
-            return True
-        except (BrokenPipeError, ValueError):
-            return False
-
+def _stop_and_finalize(audio_proc, working_video, working_audio, final_path):
+    """Stop the hardware video encoder and the mic capture, then mux + finalise on this
+    (background) thread so the capture loop keeps delivering frames immediately."""
     try:
-        while not stop_event.is_set():
-            try:
-                item = frame_q.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if not _write(item):
-                break
-        while True:                       # drain the tail of the clip
-            try:
-                item = frame_q.get_nowait()
-            except queue.Empty:
-                break
-            if not _write(item):
-                break
-    finally:
-        killer.cancel()
-        # Release the mic FIRST so the next clip can start immediately: arecord finalises the
-        # wav and frees plughw on SIGTERM.
+        picam2.stop_encoder()
+    except Exception as e:
+        print(f"stop_encoder error: {e!r}", flush=True)
+    if audio_proc is not None:
+        # arecord finalises the wav and frees the mic on SIGTERM
         try:
-            audio.terminate()
-            audio.wait(timeout=5)
+            audio_proc.terminate()
+            audio_proc.wait(timeout=5)
         except (subprocess.TimeoutExpired, OSError):
             try:
-                audio.kill()
+                audio_proc.kill()
             except OSError:
                 pass
-        # Finish the video: EOF on stdin -> ffmpeg finalises and exits (fast; no live input).
-        try:
-            video.stdin.close()
-        except (OSError, ValueError):
-            pass
-        try:
-            video.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            video.kill()
-        # Mux on a background thread so the mic stays free and the loop can record again now.
-        threading.Thread(
-            target=_mux_and_finalize, args=(final_path, tmp_video, tmp_audio), daemon=True
-        ).start()
+    record_finalize(working_video, working_audio, final_path)
 
 
-def _mux_and_finalize(final_path, tmp_video, tmp_audio):
-    """Mux the temp video (copy) + audio (to AAC) into the final clip, build the thumbnail,
-    then atomically rename so the UI only ever sees a finished, playable file. Tolerates a
-    missing/empty audio file -- a clip with no sound still beats no clip."""
-    working_path = str(TMP_DIR / (Path(final_path).stem + ".part"))
-    have_video = Path(tmp_video).exists() and Path(tmp_video).stat().st_size > 0
-    have_audio = Path(tmp_audio).exists() and Path(tmp_audio).stat().st_size > 0
-    if not have_video:
-        print(f"WARNING: no video for {Path(final_path).name}; discarding", flush=True)
-        _cleanup(tmp_video, tmp_audio)
+def record_finalize(working_video, working_audio, final_path):
+    """Mux the hardware-encoded video (copy) with the mic audio (to AAC) into the final clip,
+    build a thumbnail, then atomically rename so the UI only ever sees a finished, playable
+    file. Tolerates missing/empty audio -- a silent clip beats no clip."""
+    if not working_video or not final_path:
         return
-
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_video]
+    vp = Path(working_video)
+    if not vp.exists() or vp.stat().st_size == 0:
+        print(f"WARNING: no video for {Path(final_path).name}; discarding", flush=True)
+        _cleanup(working_video, working_audio)
+        return
+    have_audio = bool(working_audio) and Path(working_audio).exists() and Path(working_audio).stat().st_size > 0
+    source = working_video
     if have_audio:
-        cmd += ["-i", tmp_audio, "-map", "0:v:0", "-map", "1:a:0",
-                "-c:v", "copy", "-c:a", "aac", "-shortest"]
-    else:
-        cmd += ["-c:v", "copy"]
-    cmd += ["-f", "mp4", working_path]
-
-    rc = subprocess.run(cmd).returncode
-    if rc == 0 and Path(working_path).exists():
-        generate_thumbnail(working_path, THUMB_DIR / (Path(final_path).stem + ".jpg"))
-        os.rename(working_path, final_path)
+        muxed = str(TMP_DIR / (Path(final_path).stem + ".part"))
+        rc = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", working_video, "-i", working_audio,
+             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-shortest",
+             "-f", "mp4", muxed]
+        ).returncode
+        if rc == 0 and Path(muxed).exists():
+            _cleanup(working_video)
+            source = muxed
+        else:
+            print(f"WARNING: mux failed ({rc}) for {Path(final_path).name}; keeping silent video", flush=True)
+            _cleanup(muxed)
+    generate_thumbnail(source, THUMB_DIR / (Path(final_path).stem + ".jpg"))
+    try:
+        os.rename(source, final_path)
         print(f"saved -> {Path(final_path).name}", flush=True)
-    else:
-        print(f"WARNING: mux failed ({rc}) for {Path(final_path).name}; discarding", flush=True)
-        _cleanup(working_path)
-    _cleanup(tmp_video, tmp_audio)
+    except OSError as e:
+        print(f"WARNING: finalize failed for {Path(final_path).name}: {e!r}", flush=True)
+        _cleanup(source)
+    _cleanup(working_audio)
 
 
 def _cleanup(*paths):
@@ -428,31 +381,38 @@ def _cleanup(*paths):
 
 def motion_loop():
     """Background thread. Owns all camera reads. Lores drives motion detection + the live
-    stream; while recording, main frames are rotated and handed to a recorder thread.
-    Every delivered frame updates the watchdog heartbeat, and the body is guarded so a
-    single bad frame (or a transient camera error) can't silently kill the thread."""
+    stream; recording is handed to picamera2's hardware H264Encoder, which pulls the main
+    stream itself -- the loop never touches main, so a clip can't starve the camera or the
+    stream. Every delivered frame updates the watchdog heartbeat, and the body is guarded so
+    a single bad frame (or a transient camera error) can't silently kill the thread."""
     global _last_loop_at
     prev_frame = None
     recording = False
     record_started_at = 0.0
     last_motion_at = 0.0
     last_stream_update = 0.0
-    frame_q = None
-    stop_event = None
-    recorder_th = None
-    clip_rotation = 0
+    encoder = None
+    audio_proc = None
+    working_video = None
+    working_audio = None
     final_path = None
+    finalize_th = None              # the previous clip's stop/finalise; the next clip waits on it
     record_cooldown_until = 0.0     # suppress retries for a few seconds after a failure/skip
 
-    def end_recording(signal_stop=True):
-        nonlocal recording, frame_q, stop_event, recorder_th, prev_frame
-        if signal_stop and stop_event is not None:
-            stop_event.set()          # non-blocking; the recorder drains + finalizes itself
+    def end_recording():
+        nonlocal recording, encoder, audio_proc, working_video, working_audio, final_path, finalize_th, prev_frame
+        # stop + finalise off-thread so the mic is freed and the loop keeps delivering frames
+        finalize_th = threading.Thread(
+            target=_stop_and_finalize,
+            args=(audio_proc, working_video, working_audio, final_path), daemon=True,
+        )
+        finalize_th.start()
         recording = False
-        frame_q = None
-        stop_event = None
-        # keep the recorder_th reference: a new clip must wait until it has fully exited
-        # (mic released) before opening the device again
+        encoder = None
+        audio_proc = None
+        working_video = None
+        working_audio = None
+        final_path = None
         prev_frame = None
         set_state(recording=False, recording_filename=None, recording_started_at=None)
 
@@ -486,20 +446,7 @@ def motion_loop():
                     # master switch turned off mid-clip -- finish the current clip cleanly
                     print("recording disabled; stopping current clip", flush=True)
                     end_recording()
-                elif recorder_th is not None and not recorder_th.is_alive():
-                    # ffmpeg/ALSA failure took the recorder down -- stop cleanly instead of
-                    # spending the next QUIET_SECONDS writing into a dead queue
-                    print("recorder thread ended early; stopping clip", flush=True)
-                    end_recording(signal_stop=False)
-                    record_cooldown_until = now + RECORD_COOLDOWN
                 else:
-                    main = req.make_array("main")
-                    main = rotate_frame(main, clip_rotation)
-                    try:
-                        frame_q.put_nowait(main.tobytes())
-                    except queue.Full:
-                        pass  # encoder is behind; drop this frame rather than stall detection
-
                     if motion:
                         last_motion_at = now
                     quiet_for = now - last_motion_at
@@ -509,38 +456,53 @@ def motion_loop():
                         print(f"stopped ({reason}, {recorded_for:.1f}s)", flush=True)
                         end_recording()
             else:
-                recorder_done = recorder_th is None or not recorder_th.is_alive()
-                if motion and recording_enabled() and now >= record_cooldown_until and recorder_done:
+                finalize_done = finalize_th is None or not finalize_th.is_alive()
+                if motion and recording_enabled() and now >= record_cooldown_until and finalize_done:
                     free = free_mb()
                     if free < MIN_FREE_MB:
                         free = enforce_retention()      # prune oldest clips to make room
                     if free < MIN_FREE_MB:
-                        # nothing left to prune and still no room -- skip rather than stall ffmpeg
-                        # on a full disk (which would block the write and hold the mic)
+                        # nothing left to prune and still no room -- skip rather than start a clip we
+                        # can't finish (a full disk would stall the encoder and hold the mic)
                         print(f"low disk: {free:.0f} MB free, skipping recording", flush=True)
                         record_cooldown_until = now + RECORD_COOLDOWN
                     else:
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         final_path = f"{CAPTURE_DIR}/clip_{timestamp}.mp4"
-                        clip_rotation = get_rotation()              # snapshot: whole clip uses one rotation
-                        out_w, out_h = rotated_size(HIGH_RES, clip_rotation)
-                        frame_q = queue.Queue(maxsize=FRAME_QUEUE_MAX)
-                        stop_event = threading.Event()
-                        recorder_th = threading.Thread(
-                            target=recorder_thread,
-                            args=(final_path, frame_q, out_w, out_h, stop_event),
-                            daemon=True,
-                        )
-                        recorder_th.start()
-                        record_started_at = now
-                        last_motion_at = now
-                        recording = True
-                        set_state(
-                            recording=True,
-                            recording_filename=f"clip_{timestamp}.mp4",
-                            recording_started_at=now,
-                        )
-                        print(f"motion: {motion_pixels} pixels, recording -> clip_{timestamp}.mp4", flush=True)
+                        working_video = str(TMP_DIR / f"clip_{timestamp}.video.mp4")
+                        working_audio = str(TMP_DIR / f"clip_{timestamp}.audio.wav")
+                        encoder = H264Encoder(bitrate=_bitrate_bps(VIDEO_BITRATE))
+                        # picamera2 0.3.34's FfmpegOutput audio is PulseAudio-only, so the ALSA
+                        # mic is captured separately by arecord and muxed in at finalize.
+                        encoder.output = FfmpegOutput(working_video, audio=False)
+                        try:
+                            picam2.start_encoder(encoder, name="main")
+                        except Exception as e:
+                            print(f"start_encoder failed: {e!r}", flush=True)
+                            encoder = None
+                            working_video = None
+                            working_audio = None
+                            final_path = None
+                            record_cooldown_until = now + RECORD_COOLDOWN
+                        else:
+                            audio_proc = None
+                            if AUDIO_ENABLED:
+                                try:
+                                    audio_proc = subprocess.Popen(
+                                        ["arecord", "-D", MIC_DEVICE, "-f", "cd", "-q", working_audio],
+                                        stderr=subprocess.DEVNULL,
+                                    )
+                                except OSError as e:
+                                    print(f"arecord failed to start: {e!r}", flush=True)
+                            record_started_at = now
+                            last_motion_at = now
+                            recording = True
+                            set_state(
+                                recording=True,
+                                recording_filename=f"clip_{timestamp}.mp4",
+                                recording_started_at=now,
+                            )
+                            print(f"motion: {motion_pixels} pixels, recording -> clip_{timestamp}.mp4", flush=True)
         except Exception as e:
             # one bad frame shouldn't take down the loop; log it and keep going
             print(f"motion_loop iteration error: {e!r}", flush=True)

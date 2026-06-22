@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
+import { rotationStyles } from './rotation'
 
-function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBatchDelete, markedForBatchDelete, isFavorite, toggleFavorite }) {
+function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBatchDelete, markedForBatchDelete, isFavorite, toggleFavorite, rotation = 0 }) {
     const [isPlaying, setIsPlaying] = useState(false)
     const [progress, setProgress] = useState(0)
     const [currentTime, setCurrentTime] = useState('0:00')
@@ -8,6 +9,7 @@ function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBa
     const [isMuted, setIsMuted] = useState(false)
     const [isFullscreen, setIsFullscreen] = useState(false)
     const [showControls, setShowControls] = useState(false)
+    const [aspect, setAspect] = useState(16 / 9)
     const videoRef = useRef(null)
     const controlsTimeoutRef = useRef(null)
 
@@ -37,7 +39,9 @@ function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBa
     }
 
     const handleLoadedMetadata = () => {
-        setDuration(formatTime(videoRef.current.duration))
+        const v = videoRef.current
+        setDuration(formatTime(v.duration))
+        if (v.videoWidth && v.videoHeight) setAspect(v.videoWidth / v.videoHeight)
     }
 
     const handleSeek = (e) => {
@@ -75,14 +79,18 @@ function VideoPlayer({ src, clipName, onDelete, isBatchDeleting, toggleMarkForBa
         }
     }, [isPlaying])
 
+    const { wrapper, media } = rotationStyles(rotation, aspect)
+
     return (
         <div
             className="video-container"
+            style={wrapper}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => isPlaying && setShowControls(false)}
         >
             <video
                 ref={videoRef}
+                style={media}
                 src={`${src}#t=0.001`}
                 onClick={togglePlay}
                 onTimeUpdate={handleTimeUpdate}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { withToken } from './api'
+import { rotationStyles } from './rotation'
 import './App.css'
 import logo from './assets/logo.png'
 import ClipCard from './ClipCard'
@@ -22,6 +23,7 @@ export default function App() {
   const [rotation, setRotation] = useState(0)
   const [rotationLoading, setRotationLoading] = useState(true)
   const [rotationSaving, setRotationSaving] = useState(false)
+  const [liveAspect, setLiveAspect] = useState(4 / 3)
 
   const [favorites, setFavorites] = useState(() => {
     try {
@@ -199,16 +201,15 @@ export default function App() {
     return () => { mounted = false }
   }, [])
 
-  const saveRotation = async () => {
+  const saveRotation = async (value) => {
     try {
       setRotationSaving(true)
       const res = await fetch(withToken('/api/rotation'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rotation }),
+        body: JSON.stringify({ rotation: value }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      // Optionally re-fetch or notify success
     } catch (e) {
       alert(`Failed to save rotation: ${e.message}`)
     } finally {
@@ -223,6 +224,7 @@ export default function App() {
 
   const favNames = new Set(favorites.map(f => f.name))
   const nonFavoritesOnPage = clips.filter(c => !favNames.has(c.name)).length
+  const liveStyles = rotationStyles(rotation, liveAspect)
 
   return (
     <div className="app">
@@ -232,18 +234,34 @@ export default function App() {
       </section>
       <section className="live-wrap">
         <h2>Live</h2>
-        <img className="live" src={withToken("/stream.mjpg")} alt="Live feed" />
+        <div style={{ ...liveStyles.wrapper, background: '#000', borderRadius: '4px' }}>
+          <img
+            className="live"
+            style={liveStyles.media}
+            src={withToken("/stream.mjpg")}
+            alt="Live feed"
+            onLoad={(e) => {
+              const { naturalWidth: w, naturalHeight: h } = e.currentTarget
+              if (w && h) setLiveAspect(w / h)
+            }}
+          />
+        </div>
         <div className="rotation-control" style={{ marginTop: '8px' }}>
           <label style={{ marginRight: '8px' }}>Rotation:</label>
-          <select value={rotation} onChange={(e) => setRotation(parseInt(e.target.value, 10))} disabled={rotationLoading || rotationSaving}>
+          <select
+            value={rotation}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              setRotation(v)      // rotate the view immediately
+              saveRotation(v)     // persist so it sticks across refreshes / other viewers
+            }}
+            disabled={rotationLoading || rotationSaving}
+          >
             <option value={0}>0°</option>
             <option value={90}>90°</option>
             <option value={180}>180°</option>
             <option value={270}>270°</option>
           </select>
-          <button className="btn" style={{ marginLeft: '8px' }} onClick={saveRotation} disabled={rotationLoading || rotationSaving}>
-            {rotationSaving ? 'Saving...' : 'Apply'}
-          </button>
           <button className="btn" style={{ marginLeft: '8px' }} onClick={toggleRecording} >
             {recordingState ? 'Stop Recording' : 'Start Recording'}
           </button>
@@ -295,6 +313,7 @@ export default function App() {
                   markedForBatchDelete={markedForBatchDelete.has(clip.name)}
                   isFavorite={true}
                   toggleFavorite={toggleFavorite}
+                  rotation={rotation}
                 />
               ))
             )
@@ -312,6 +331,7 @@ export default function App() {
                   markedForBatchDelete={markedForBatchDelete.has(clip.name)}
                   isFavorite={favorites.some(f => f.name === clip.name)}
                   toggleFavorite={toggleFavorite}
+                  rotation={rotation}
                 />
               ))
             )
@@ -322,6 +342,3 @@ export default function App() {
     </div>
   )
 }
-
-
-

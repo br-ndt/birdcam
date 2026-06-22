@@ -1,7 +1,7 @@
 import { withToken } from './api'
 import VideoPlayer from './VideoPlayer'
 
-function ClipCard({ clip, onDelete, isBatchDeleting, toggleMarkForBatchDelete, markedForBatchDelete, isFavorite, toggleFavorite }) {
+function ClipCard({ clip, onDelete, isBatchDeleting, toggleMarkForBatchDelete, markedForBatchDelete, isFavorite, toggleFavorite, rotation }) {
   return (
     <div className="clip">
       <div className="meta">
@@ -16,6 +16,7 @@ function ClipCard({ clip, onDelete, isBatchDeleting, toggleMarkForBatchDelete, m
         markedForBatchDelete={markedForBatchDelete}
         isFavorite={isFavorite}
         toggleFavorite={() => toggleFavorite(clip)}
+        rotation={rotation}
       />
     </div>
   )
