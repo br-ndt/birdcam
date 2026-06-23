@@ -113,22 +113,27 @@ wheels = [
 
 [[package]]
 name = "birdcam"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "flask" },
     { name = "opencv-python-headless" },
-    { name = "picamera2" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
+]
+
+[package.optional-dependencies]
+standalone = [
+    { name = "picamera2" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "flask", specifier = ">=3.0.0" },
     { name = "opencv-python-headless", specifier = ">=4.10.0" },
-    { name = "picamera2", specifier = ">=0.3.34" },
+    { name = "picamera2", marker = "extra == 'standalone'", specifier = ">=0.3.34" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
 ]
+provides-extras = ["standalone", "recorder"]
 
 [[package]]
 name = "blinker"

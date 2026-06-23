@@ -15,6 +15,10 @@ rtsp_detect = ""                            # low-res detect substream, e.g.
                                             # "rtsp://CHANGE-ME:8554/cam-lo". Empty = run motion
                                             # on the full main stream (heavier decode). Enable the
                                             # `cam-lo` path in the node's mediamtx.yml, then set it.
+rtsp_audio  = ""                            # optional audio-only path, e.g.
+                                            # "rtsp://CHANGE-ME:8554/cam-audio". Empty = silent
+                                            # clips. Recorded in parallel and muxed in at finalize;
+                                            # if it's ever unreachable the clip just comes out silent.
 
 # --- motion / clips ---
 motion_threshold = 5000     # changed pixels needed to trigger

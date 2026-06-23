@@ -6,6 +6,7 @@ is produced by an ffmpeg subprocess instead of the local hardware encoder. No pi
 import subprocess
 import threading
 from datetime import datetime
+from pathlib import Path
 from time import sleep, time
 
 import cv2
@@ -13,7 +14,7 @@ import cv2
 from birdcam import state, recording
 from birdcam.motion import detect_motion
 from birdcam.config import (
-    RTSP_MAIN, RTSP_DETECT, STREAM_FPS, STREAM_QUALITY, MOTION_THRESHOLD,
+    RTSP_MAIN, RTSP_DETECT, RTSP_AUDIO, STREAM_FPS, STREAM_QUALITY, MOTION_THRESHOLD,
     QUIET_SECONDS, MAX_CLIP_SECONDS, RECORD_COOLDOWN, MIN_FREE_MB, CAPTURE_DIR, TMP_DIR,
 )
 
@@ -30,22 +31,58 @@ def _start_record(main_url, working_path):
     )
 
 
-def _stop_and_finalize(proc, working_path, final_path):
-    """Stop the recording ffmpeg (graceful 'q' so the mp4 finalises), then finalise the clip.
-    Runs on a background thread so the detect loop keeps delivering frames."""
-    if proc is not None:
+def _start_audio_record(audio_url, working_audio):
+    """Pull the node's audio-only RTSP path to disk as ADTS AAC -- a streamable container that
+    stays usable even if the process is killed (no moov atom to finalise). Runs independently
+    of the video pull, so if audio is down the clip just comes out silent instead of failing.
+    The node already encodes AAC, so this copies, never re-encodes."""
+    return subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-rtsp_transport", "tcp", "-i", audio_url,
+         "-vn", "-c:a", "copy", "-f", "adts", working_audio],
+        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+
+
+def _stop_proc(proc, graceful):
+    if proc is None:
+        return
+    try:
+        if graceful:
+            proc.communicate(input=b"q", timeout=5)   # 'q' lets ffmpeg write the mp4 moov atom
+        else:
+            proc.terminate()
+            proc.wait(timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
         try:
-            proc.communicate(input=b"q", timeout=5)
-        except (subprocess.TimeoutExpired, OSError):
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-    recording.finalize_clip(working_path, final_path)
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _stop_and_finalize(video_proc, audio_proc, working_video, working_audio, final_path):
+    """Stop both recorders, mux the audio sidecar into the video if we captured any, then hand
+    the finished file to the shared finaliser. Runs on a background thread so the detect loop
+    keeps delivering frames."""
+    _stop_proc(video_proc, graceful=True)    # mp4 needs the graceful 'q' to finalise
+    _stop_proc(audio_proc, graceful=False)   # ADTS is fine to just terminate
+    source = working_video
+    have_audio = (working_audio and Path(working_audio).exists()
+                  and Path(working_audio).stat().st_size > 0)
+    if working_video and have_audio:
+        muxed = str(TMP_DIR / (Path(final_path).stem + ".muxed.mp4"))
+        rc = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", working_video, "-i", working_audio,
+             "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-shortest", "-f", "mp4", muxed]
+        ).returncode
+        if rc == 0 and Path(muxed).exists() and Path(muxed).stat().st_size > 0:
+            recording._cleanup(working_video)
+            source = muxed
+        else:
+            print(f"WARNING: audio mux failed ({rc}); keeping silent video", flush=True)
+            recording._cleanup(muxed)
+    recording.finalize_clip(source, final_path)
+    recording._cleanup(working_audio)
 
 
 def _detect_loop(cap):
@@ -57,20 +94,25 @@ def _detect_loop(cap):
     last_motion_at = 0.0
     last_stream_update = 0.0
     rec_proc = None
+    audio_proc = None
     working_path = None
+    working_audio = None
     final_path = None
     finalize_th = None
     record_cooldown_until = 0.0
 
     def end_recording():
-        nonlocal recording_now, rec_proc, working_path, final_path, finalize_th, prev_frame
+        nonlocal recording_now, rec_proc, audio_proc, working_path, working_audio, final_path, finalize_th, prev_frame
         finalize_th = threading.Thread(
-            target=_stop_and_finalize, args=(rec_proc, working_path, final_path), daemon=True,
+            target=_stop_and_finalize,
+            args=(rec_proc, audio_proc, working_path, working_audio, final_path), daemon=True,
         )
         finalize_th.start()
         recording_now = False
         rec_proc = None
+        audio_proc = None
         working_path = None
+        working_audio = None
         final_path = None
         prev_frame = None
         state.set_state(recording=False, recording_filename=None, recording_started_at=None)
@@ -135,9 +177,20 @@ def _detect_loop(cap):
                             print(f"ingest: failed to start recorder: {e!r}", flush=True)
                             rec_proc = None
                             working_path = None
+                            working_audio = None
                             final_path = None
                             record_cooldown_until = now + RECORD_COOLDOWN
                         else:
+                            audio_proc = None
+                            working_audio = None
+                            if RTSP_AUDIO:
+                                working_audio = str(TMP_DIR / f"clip_{timestamp}.aac")
+                                try:
+                                    audio_proc = _start_audio_record(RTSP_AUDIO, working_audio)
+                                except OSError as e:
+                                    print(f"ingest: audio recorder failed to start: {e!r}", flush=True)
+                                    audio_proc = None
+                                    working_audio = None
                             record_started_at = now
                             last_motion_at = now
                             recording_now = True
@@ -161,7 +214,7 @@ def run():
             "(e.g. rtsp_main = \"rtsp://sarkos:8554/cam\")"
         )
     detect_url = RTSP_DETECT or RTSP_MAIN
-    print(f"ingest: detect={detect_url}  record={RTSP_MAIN}", flush=True)
+    print(f"ingest: detect={detect_url}  record={RTSP_MAIN}  audio={RTSP_AUDIO or '(none)'}", flush=True)
     while True:
         cap = cv2.VideoCapture(detect_url)
         if not cap.isOpened():

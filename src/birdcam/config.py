@@ -94,3 +94,5 @@ RECORD_AUDIO        = CONFIG.get("record_audio", True)    # false -> video-only 
 # --- recorder (RTSP ingest) only ---
 RTSP_MAIN   = CONFIG.get("rtsp_main", "")     # node main stream, e.g. "rtsp://sarkos:8554/cam"
 RTSP_DETECT = CONFIG.get("rtsp_detect", "")   # low-res detect substream; falls back to RTSP_MAIN if empty
+RTSP_AUDIO  = CONFIG.get("rtsp_audio", "")    # optional audio-only path, e.g. "rtsp://sarkos:8554/cam-audio";
+                                              # empty = silent clips (the node has no audio stream)
