@@ -13,3 +13,19 @@ paths:
     rpiCameraBitrate: 4000000
     rpiCameraIDRPeriod: 30        # keyframe every 1s -> fast recorder join + clean clip cuts
     rpiCameraAfMode: continuous   # CM3 autofocus; for fixed focus use manual + rpiCameraLensPosition: 1.4
+
+  # USB mic on this node, published as an audio-only stream so the recorder can mux it into
+  # clips. runOnInit launches ffmpeg at startup to capture ALSA -> AAC and publish it back into
+  # this same server (the command runs via a shell, so $RTSP_PORT and $MTX_PATH expand). Set the
+  # device to match `arecord -l` on this Pi -- plughw:CARD,DEVICE; the plughw plugin auto-converts
+  # rate/format/channels. The user MediaMTX runs as must be in the `audio` group to open it.
+  cam-audio:
+    runOnInit: ffmpeg -nostdin -f alsa -i plughw:1,0 -ac 1 -ar 44100 -c:a aac -b:a 128k -f rtsp -rtsp_transport tcp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    runOnInitRestart: yes
+
+  # Later, the recorder's cheap detect stream -- a low-res secondary off the same camera:
+  # cam-lo:
+  #   source: rpiCamera
+  #   rpiCameraSecondary: true
+  #   rpiCameraWidth: 640
+  #   rpiCameraHeight: 480
